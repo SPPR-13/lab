@@ -1,0 +1,228 @@
+﻿@page "/blackjack"
+@using Domains
+@using Microsoft.AspNetCore.SignalR
+@using Microsoft.AspNetCore.SignalR.Client
+@inject NavigationManager NavigationManager
+@implements IAsyncDisposable
+
+<PageTitle>Blackjack</PageTitle>
+
+@if (player.Username == null)
+{
+    <div class="form-group">
+        <label>
+            User:
+            <input @bind="usernameInput" />
+        </label>
+    </div>
+    <button @onclick="Join" disabled="@(!IsConnected)">Join</button>
+}
+else
+{
+    <p>Username: @player.Username</p>
+    @if (!game.GameStarted)
+    {
+        <button @onclick="Ready" disabled="@(!IsConnected)">Ready</button>
+        <button @onclick="BeginGame" disabled="@(!IsConnected)">Begin game</button>
+    }
+    <p>My cards: @player.ValueOfCards</p>
+    @if (player.Cards == null)
+    {
+        <p>No cards</p>
+    }
+    else
+    {
+        <p style="font-size:120px">
+            @foreach (var card in player.Cards)
+            {
+                @card.ToUnicode()
+            }
+        </p>
+    }
+    @if ((player.LastAction.Equals("Ready") || player.LastAction.Equals("Hit")) && game.GameStarted)
+    {
+        <button @onclick="Hit" disabled="@(!IsConnected)">Hit</button>
+        <button @onclick="Stay" disabled="@(!IsConnected)">Stay</button>
+    }
+
+    <table class="table table-striped">
+        <thead class="thead-light">
+            <tr>
+                <th scope="col">Username</th>
+                <th scope="col">Last action</th>
+                <th scope="col">Points</th>
+            </tr>
+        </thead>
+        @if (game.Players != null)
+        {
+            <tbody>
+                @foreach (var participant in game.Players)
+                {
+                    <tr>
+                        <td>@participant.Username</td>
+                        <td>@participant.LastAction</td>
+                        <td>@participant.Points</td>
+                    </tr>
+                }
+            </tbody>
+        }
+    </table>
+}
+<hr />
+
+@code {
+    private HubConnection? hubConnection;
+    private string? usernameInput;
+    private Player player = new();// empty player
+    private Game game = new(); // empty game
+    private List<string> messages = new List<string>();
+
+    // connection to hub
+    protected override async Task OnInitializedAsync()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl("https://localhost:7112/blackjackhub")
+            .Build();
+
+        // adds player to game
+        hubConnection.On<Player, Game>("ReceivePlayer", (newPlayer, gameUpdate) =>
+        {
+            if (game.Players == null)
+            {
+                game.Players = new();
+            }
+
+            game.Players.Add(newPlayer);
+
+            var encodedMsg = $"New player connected {newPlayer.Username}";
+            messages.Add(encodedMsg);
+            StateHasChanged();
+
+            if (gameUpdate.Players == null)
+            {
+                UpdateGame();
+            }
+            else if (game.Players.Count > gameUpdate.Players.Count)
+            {
+                UpdateGame();
+            }
+        });
+
+        // adds player to game
+        hubConnection.On<Game>("PlayerReady", gameUpdate =>
+        {
+            game = gameUpdate;
+            StateHasChanged();
+        });
+
+        hubConnection.On<Game>("UpdateGame", gameUpdate =>
+          {
+              game = gameUpdate;
+              StateHasChanged();
+          });
+
+        // sets game (deck,dealer,players)
+        hubConnection.On<Game>("BeginGame", newGame =>
+        {
+            game = newGame;
+            player = game.GetPlayer(player);
+
+            messages.Add("GAME HAS STARTED");
+            StateHasChanged();
+        });
+
+        hubConnection.On<Player, Game>("ReceiveCard", (playerState, gameState) =>
+        {
+            game = gameState;
+            player = game.GetPlayer(player);
+            var encodedMsg = $"{playerState.Username} took another card.";
+            messages.Add(encodedMsg);
+            StateHasChanged();
+        });
+
+        hubConnection.On<Player, Game>("ReceiveStatus", (playerStatus, gameState) =>
+        {
+            game = gameState;
+            player = game.GetPlayer(player);
+            var encodedMsg = $"{playerStatus.Username} staying.";
+            messages.Add(encodedMsg);
+            StateHasChanged();
+        });
+
+        await hubConnection.StartAsync();
+    }
+
+    private async Task UpdateGame()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("UpdateGame", game);
+        }
+    }
+
+    // sets the username, enables chat and adds player to group
+    private async Task Join()
+    {
+        if (hubConnection is not null)
+        {
+            player.Username = usernameInput;
+            game.Players = new();
+            await hubConnection.SendAsync("Join", player, game);
+        }
+    }
+
+    // sets the username, enables chat and adds player to group
+    private async Task Ready()
+    {
+        if (hubConnection is not null)
+        {
+            player.LastAction = "Ready";
+            game.UpdatePlayer(player);
+            await hubConnection.SendAsync("Ready", game);
+        }
+    }
+
+    // starts the game
+    private async Task BeginGame()
+    {
+        if (hubConnection is not null)
+        {
+            foreach (var participant in game.Players)
+            {
+                if (game.Players.All(p => p.LastAction == "Ready"))
+                {
+                    await hubConnection.SendAsync("BeginGame", game);
+                }
+            }
+        }
+    }
+
+    // hit
+    private async Task Hit()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("Hit", player, game);
+        }
+    }
+
+    // stay
+    private async Task Stay()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.SendAsync("Stay", player, game);
+        }
+    }
+
+    // tells chat a new player has joined
+    public bool IsConnected => hubConnection?.State == HubConnectionState.Connected;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+}
